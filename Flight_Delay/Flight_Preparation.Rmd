@@ -1,0 +1,468 @@
+---
+title: "Regressuib"
+author: "HO THI HOANG NHU"
+date: "2024-05-27"
+output: html_document
+---
+# 1. cleaning data
+```{r setup, include=FALSE}
+# Load necessary libraries
+# Function to check for and install required packages
+check_and_install <- function(packages) {
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      install.packages(pkg, dependencies = TRUE)
+      library(pkg, character.only = TRUE)
+    }
+  }
+}
+
+# List of required packages
+required_packages <- c("dplyr", "caret", "e1071", "glmnet", "class", "Metrics", "janitor", "tidyr", "mice","corrplot","PerformanceAnalytics","gridExtra","tibble","purrr")
+
+check_and_install(required_packages)
+
+```
+
+```{r}
+# Load the dataset
+train_data <- read.csv("~/Desktop/ML_project/data/delays_train.csv")
+test_data <- read.csv("~/Desktop/ML_project/data/delays_test.csv")
+head(train_data,5)
+```
+
+
+```{r}
+glimpse(train_data)
+
+cat("dimesion:", dim(train_data))
+```
+## factor variables:
+Weekday  Month_of_Year Day_of_Month
+```{r}
+train_data <- train_data %>%
+  mutate(
+    Weekday = factor(Weekday, levels = 1:7, labels = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")),
+    Month_of_Year = factor(Month_of_Year),
+    Day_of_Month = factor(Day_of_Month)
+  )
+
+table(train_data[1:2])
+
+```
+chugn ta thay data kha deu va data tu thang 1 den thang 7
+
+Character variables:
+```{r}
+
+unique_character_values <- train_data %>%
+  select_if(is.character) %>%
+  summarise_all(~ list(unique(.))) %>%
+  unlist(recursive = FALSE)
+
+# unique values
+for (col_name in names(unique_character_values)) {
+  cat("Unique values in column", col_name, ":\n")
+  print(unique_character_values[[col_name]])
+  cat("length:", length(unique_character_values[[col_name]]), "\n")
+  cat("\n")
+}
+```
+```{r}
+#check unique value of 2 variables
+setequal(train_data %>%pull(Arrival_State) %>% unique(), 
+         train_data %>%pull(Departure_State) %>%unique())
+```
+we see that there are 10 Marketing Airlines, but there is mising value in there. next we have total 53 arrival and departure points
+
+```{r}
+#Processing the Marketing_Airline:
+unique_Mar <- train_data %>%
+  select(Marketing_Airline_DOT_ID, Marketing_Airline) %>%
+  distinct() %>%
+  group_by(Marketing_Airline_DOT_ID) %>%
+  summarise(Marketing_Airline = paste(unique(Marketing_Airline[Marketing_Airline != ""]), collapse = ", "))
+
+print(unique_Mar)
+
+```
+bây giờ với missing data của Marketing Airline we  use bảng trên để lấp đầy missing đó.
+
+```{r}
+train_data <- left_join(train_data, unique_Mar, by = "Marketing_Airline_DOT_ID")
+
+train_data <- train_data %>% 
+  mutate(Marketing_Airline.x = Marketing_Airline.y) %>%  # Cập nhật cột Marketing_Airline
+  select(-Marketing_Airline.y) %>%
+  rename(Marketing_Airline = Marketing_Airline.x)
+
+table(train_data$Marketing_Airline)
+
+
+```
+
+```{r}
+#review about the character variables:
+character_vars <- 
+  sapply(train_data, is.character) %>% 
+  which() %>% 
+  names()
+
+sapply(train_data[, character_vars], 
+        function(x) 
+          unique(x) %>% 
+          length()) %>% 
+  sort()
+```
+```{r}
+# Convert character variables to factors
+train_data[character_vars] <- lapply(train_data[character_vars], as.factor)
+
+```
+
+
+## Numeric variables:
+
+```{r}
+summary(train_data)
+```
+
+```{r}
+colSums(is.na(train_data)) %>% 
+  sort()
+
+
+# and we can easily check this for
+# all numeric variables
+# except the Mean_Arrival_Delay
+numeric_vars <- 
+  sapply(train_data, is.numeric) %>% 
+  which() %>% 
+  names()
+```
+mean
+```{r}
+# Calculate the frequency of each Destination_Airport_ID in each group and find the value with the highest frequency
+unique_State_with_freq <- train_data %>%
+  filter(!is.na(Destination_Airport_ID)) %>%
+  group_by(Departure_State, Arrival_State, Destination_Airport_ID) %>%
+  summarise(freq = n(), .groups = 'drop') %>%
+  group_by(Departure_State, Arrival_State) %>%
+  mutate(max_freq = max(freq)) %>%
+  filter(freq == max_freq) %>%
+  summarise(frequency_most_value = paste(unique(Destination_Airport_ID), collapse = ", "), .groups = 'drop')
+
+# mean for group by Departure_State và Arrival_State
+average_data <- train_data %>%
+  group_by(Departure_State) %>%
+  summarise(
+    Av_Actual_Departure_Time = round(mean(Actual_Departure_Time, na.rm = TRUE),0),
+    Av_Taxi_Out_Time = mean(Taxi_Out_Time, na.rm = TRUE),
+    Av_Taxi_In_Time = mean(Taxi_In_Time, na.rm = TRUE),
+    Av_Flight_Distance = mean(Flight_Distance, na.rm = TRUE),
+    Av_Origin_Temperature = mean(Origin_Temperature, na.rm = TRUE),
+    Av_Destination_Temperature = mean(Destination_Temperature, na.rm = TRUE),
+    Av_Flight_Duration = mean(Flight_Duration, na.rm = TRUE),
+    Av_Origin_Wind_Speed = mean(Origin_Wind_Speed, na.rm = TRUE),
+    Av_Destination_Wind_Speed = mean(Destination_Wind_Speed, na.rm = TRUE),
+    Av_Departure_Delay = mean(Departure_Delay, na.rm = TRUE),
+    Mean_Arrival_Delay = mean(Arrival_Delay, na.rm = TRUE),
+    .groups = 'drop'  # Loại bỏ nhóm sau khi tính toán
+  )
+
+# combine
+train_data <- train_data %>%
+  left_join(unique_State_with_freq, by = c("Departure_State", "Arrival_State")) %>%
+  left_join(average_data, by = c("Departure_State"))
+
+train_data <- train_data %>%
+  mutate(
+    Destination_Airport_ID = ifelse(is.na(Destination_Airport_ID), frequency_most_value, Destination_Airport_ID),
+    Actual_Departure_Time = ifelse(is.na(Actual_Departure_Time), Av_Actual_Departure_Time, Actual_Departure_Time),
+    Taxi_Out_Time = ifelse(is.na(Taxi_Out_Time), Av_Taxi_Out_Time, Taxi_Out_Time),
+    Taxi_In_Time = ifelse(is.na(Taxi_In_Time), Av_Taxi_In_Time, Taxi_In_Time),
+    Flight_Distance = ifelse(is.na(Flight_Distance), Av_Flight_Distance, Flight_Distance),
+    Origin_Temperature = ifelse(is.na(Origin_Temperature), Av_Origin_Temperature, Origin_Temperature),
+    Destination_Temperature = ifelse(is.na(Destination_Temperature), Av_Destination_Temperature, Destination_Temperature),
+    Flight_Duration = ifelse(is.na(Flight_Duration), Av_Flight_Duration, Flight_Duration),
+    Origin_Wind_Speed = ifelse(is.na(Origin_Wind_Speed), Av_Origin_Wind_Speed, Origin_Wind_Speed),
+    Destination_Wind_Speed = ifelse(is.na(Destination_Wind_Speed), Av_Destination_Wind_Speed, Destination_Wind_Speed),
+    Departure_Delay = ifelse(is.na(Departure_Delay), Av_Departure_Delay, Departure_Delay)
+  )  %>% select(-frequency_most_value,-starts_with("Av_"))
+
+```
+
+```{r}
+colSums(is.na(train_data)) %>% 
+  sort()
+
+```
+
+
+
+```{r}
+sapply(train_data[,numeric_vars], 
+        function(x) 
+          unique(x) %>% 
+          length()) %>% 
+  # lets sort variables by increasing 
+  # number of levels in the end
+  sort()
+```
+
+We noticed that scheduled departure time, scheduled arrival time, actual departure time column are given as numbers: 1444, 1568, 2334, 740. I will convert 2 hour and minute columns 
+```{r}
+# Convert HHMM time format to separate hour and minute columns
+convert_time <- function(time) {
+  hour <- as.integer(time / 100)  # Extract hour
+  minute <- time %% 100  # Extract minute
+  return(list(hour = hour, minute = minute))
+}
+
+# Columns to convert
+time_columns <- c("Scheduled_Departure_Time", "Scheduled_Arrival_Time", "Actual_Departure_Time")
+
+# Loop through time columns and convert
+for (col in time_columns) {
+  time_parts <- convert_time(train_data[[col]])
+  train_data[[paste0(col, "_Hour")]] <- time_parts$hour
+  train_data[[paste0(col, "_Minute")]] <- time_parts$minute
+}
+```
+
+```{r}
+# Lấy các biến số
+numeric_vars <- train_data %>% select_if(is.numeric)
+
+
+
+# Vẽ histogram cho từng biến số
+numeric_vars %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  facet_wrap(~ variable, scales = "free") +
+  theme_minimal() +
+  labs(title = "Histograms of Numeric Variables",
+       x = "Value",
+       y = "Frequency")
+
+```
+
+##Target variable:
+
+```{r}
+ggplot(train_data, aes(x = Arrival_Delay)) +
+  geom_histogram(binwidth = 20, fill = "skyblue", color = "black", aes(y = ..density..)) +
+  labs(title = "Distribution of Arrival Delay",
+       x = "Arrival Delay (minutes)",
+       y = "Density")
+
+```
+
+```{r}
+# clearly right-skewed distribution
+
+# lets check how it looks after 
+# log transformation
+# lets take log(x + 1) in case of zeroes
+
+ggplot(train_data, aes(x = log(Arrival_Delay+1))) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black", aes(y = ..density..)) +
+  labs(title = "Distribution of Arrival Delay",
+       x = "Arrival Delay (minutes)",
+       y = "Density")
+```
+
+```{r}
+# Check number of observation having actual arrival
+summary_data <- train_data %>%
+  group_by(Flight_Cancelled) %>%
+  summarise(
+    count = n(),
+    has_arrival_delay = sum(!is.na(Arrival_Delay))
+  )
+
+print(summary_data)
+```
+```{r}
+train_data <- train_data %>% filter(Flight_Cancelled !="True")
+```
+
+## Imputation 
+```{r}
+#save to data_full
+data_full <- train_data %>%
+  mutate(Arrival_Delay = ifelse(is.na(Arrival_Delay), Mean_Arrival_Delay, Arrival_Delay)
+  )  %>% select(- Mean_Arrival_Delay)
+```
+
+
+
+```{r}
+numeric_vars <- data_full %>% select_if(is.numeric)
+
+plot_data <- function(var){
+  qplot(x = var, y = Arrival_Delay, geom = "point", data =  data_full, main = paste("Scatter plot of", names(var), "vs Arrival Delay"))
+}
+
+lapply(numeric_vars[,1:23], function(var) plot_data(var))
+
+```
+
+
+```{r}
+correlation_matrix<-cor(numeric_vars)
+numeric_vars_order <- 
+  # we take correlations with the Arrival_Delay
+  correlation_matrix[,"Arrival_Delay"] %>% 
+  # sort them in the decreasing order
+  sort(decreasing = TRUE) %>%
+  # end extract just variables' names
+  names()
+
+
+# now we use the vector to order rows and 
+# columns of the correlation matrix on the plot
+
+corrplot.mixed(correlation_matrix[numeric_vars_order, 
+                                   numeric_vars_order],
+               upper = "square",
+               lower = "number",
+               tl.col = "black", # color of labels (variable names)
+               tl.pos = "lt",tl.cex = 0.55,number.cex = 0.4,number.digits = 1)  # position of labels (lt = left and top)
+```
+The heatmap shows the correlation coefficients between the numeric features. Departure Delay has a strong positive correlation with Arrival Delay, which means that as the Departure Delay increases, the arrival delay also tends to increase. The other features (Origin and Destination Precipitation, Flight Duration, Origin and Destination Airport ID etc) show very weak correlations with Arrival Delay, suggesting that these features by themselves do not strongly influence the arrival delay.
+
+
+Based on our careful review and exploratory data analysis so far, here's a rundown of each feature I am going to take out of the picture:
+
+*    Marketing Airline DOT ID: This is a unique identifier assigned to each flight record in the dataset. It carries no informational value for the model, as it does not reflect any characteristic of the flights.
+
+*    Flight Number: This feature represents the designated number of the flight. However, there are many unique flight numbers (3844), which could lead to overfitting. Each flight number corresponds to a specific route, and while it's true that some routes may be more prone to delays than others, the high dimensionality of this feature may be more harmful than helpful.
+
+*    Departure Time and Arrival Time hour: These feature represent the scheduled departure or arrival time hour of the flight, since we have Departure_Time feature, we can remove these features.
+
+*    Departure Time and Arrival Time minute: These features represent the scheduled departure or arrival time minute of the flight, since we have Departure_Time/Arrival_Time feature, we can remove these features.
+
+*    Diverted_Airport_Landings: This feature represents the number of landings at diverted airports. Since the correlation is not available (NaN), it indicates that there might be no variation in this feature, making it uninformative for the model.
+
+*    Origin and Destination Airport ID: These variables represent the airport id. We have Origin and Departure State show flight state and airports are placed in these states. Keeping airport id and state columns are don't make affect, so airport ids will be removed.
+
+* Remove the Flight_Cancelled becasue if canceling flight we dont have data for arrival delay -> in test data we try to replace for Arrival_Delay =0 with Flight_Cancelled = True
+```{r}
+selected_features <- c('Weekday',"Marketing_Airline", 'Month_of_Year', 'Day_of_Month', 'Scheduled_Departure_Time', 'Scheduled_Arrival_Time', 
+                      'Departure_State','Arrival_State', 'Flight_Cancelled', 'Departure_Delay', 'Arrival_Delay', 'Taxi_Out_Time', 
+                      'Taxi_In_Time', 'Flight_Diverted','Actual_Departure_Time', 'Flight_Duration', 'Flight_Distance', 
+                      'Origin_Temperature', 'Destination_Temperature', 'Origin_Wind_Speed', 'Destination_Wind_Speed', 
+                      'Origin_Precipitation', 'Destination_Precipitation')
+
+data_full <- data_full[names(data_full) %in% selected_features]
+```
+
+and we clean for outlier with Arrival_Delay> 4000
+
+
+```{r}
+data_full<- data_full[!(data_full$Arrival_Delay > 4000),]
+
+anyNA(data_full)
+```
+
+#1.2 split dataset
+```{r}
+set.seed(466503)
+flight_for_train <- createDataPartition(data_full$Arrival_Delay,p = 0.7, list = FALSE) 
+head(flight_for_train, 10)
+
+```
+
+
+
+```{r}
+flight_train <- data_full[flight_for_train,]
+flight_test <- data_full[-flight_for_train,]
+
+head(tabyl(flight_train$Arrival_Delay),5)
+head(tabyl(flight_test$Arrival_Delay),5)
+```
+
+
+
+```{r}
+# Save the list of selected variables
+save(list = c("flight_train", "flight_test"),
+     file = "flight_train_test.RData")
+```
+
+#----- 
+```{r}
+#for test_data
+
+test_data <- test_data %>%
+  mutate(
+    Weekday = factor(Weekday, levels = 1:7, labels = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")),
+    Month_of_Year = factor(Month_of_Year),
+    Day_of_Month = factor(Day_of_Month)
+  )
+
+
+test_data <- left_join(test_data, unique_Mar, by = "Marketing_Airline_DOT_ID")
+
+test_data <- test_data %>% 
+  mutate(Marketing_Airline.x = Marketing_Airline.y) %>%  # Cập nhật cột Marketing_Airline
+  select(-Marketing_Airline.y) %>%
+  rename(Marketing_Airline = Marketing_Airline.x)
+
+
+character_vars <- 
+  sapply(test_data, is.character) %>% 
+  which() %>% 
+  names()
+test_data[character_vars] <- lapply(test_data[character_vars], as.factor)
+
+
+# Calculate the frequency of each Destination_Airport_ID in each group and find the value with the highest frequency
+# combine
+test_data <- test_data %>%
+  left_join(unique_State_with_freq, by = c("Departure_State", "Arrival_State")) %>%
+  left_join(average_data, by = c("Departure_State"))
+
+test_data <- test_data %>%
+  mutate(
+    Destination_Airport_ID = ifelse(is.na(Destination_Airport_ID), frequency_most_value, Destination_Airport_ID),
+    Actual_Departure_Time = ifelse(is.na(Actual_Departure_Time), Av_Actual_Departure_Time, Actual_Departure_Time),
+    Taxi_Out_Time = ifelse(is.na(Taxi_Out_Time), Av_Taxi_Out_Time, Taxi_Out_Time),
+    Taxi_In_Time = ifelse(is.na(Taxi_In_Time), Av_Taxi_In_Time, Taxi_In_Time),
+    Flight_Distance = ifelse(is.na(Flight_Distance), Av_Flight_Distance, Flight_Distance),
+    Origin_Temperature = ifelse(is.na(Origin_Temperature), Av_Origin_Temperature, Origin_Temperature),
+    Destination_Temperature = ifelse(is.na(Destination_Temperature), Av_Destination_Temperature, Destination_Temperature),
+    Flight_Duration = ifelse(is.na(Flight_Duration), Av_Flight_Duration, Flight_Duration),
+    Origin_Wind_Speed = ifelse(is.na(Origin_Wind_Speed), Av_Origin_Wind_Speed, Origin_Wind_Speed),
+    Destination_Wind_Speed = ifelse(is.na(Destination_Wind_Speed), Av_Destination_Wind_Speed, Destination_Wind_Speed),
+    Departure_Delay = ifelse(is.na(Departure_Delay), Av_Departure_Delay, Departure_Delay)
+  )  %>% select(-frequency_most_value,-starts_with("Av_"))
+
+
+selected_features <- c('Weekday',"Marketing_Airline", 'Month_of_Year', 'Day_of_Month', 'Scheduled_Departure_Time', 'Scheduled_Arrival_Time', 
+                       'Departure_State','Arrival_State', 'Flight_Cancelled', 'Departure_Delay', 'Arrival_Delay', 'Taxi_Out_Time', 
+                       'Taxi_In_Time', 'Flight_Diverted','Actual_Departure_Time', 'Flight_Duration', 'Flight_Distance', 
+                       'Origin_Temperature', 'Destination_Temperature', 'Origin_Wind_Speed', 'Destination_Wind_Speed', 
+                       'Origin_Precipitation', 'Destination_Precipitation', "Flight_Cancelled")
+
+
+test_data <- test_data[names(test_data) %in% selected_features]
+
+anyNA(test_data)
+```
+
+
+```{r}
+
+# Save the list of selected variables
+save(list = "test_data",
+     file = "predict_data.RData")
+
+
+```
+

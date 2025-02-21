@@ -1,0 +1,206 @@
+---
+title: "Modeling"
+author: "Nhu Ho"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+check_and_install <- function(packages) {
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      install.packages(pkg, dependencies = TRUE)
+      library(pkg, character.only = TRUE)
+    }
+  }
+}
+
+required_packages <- c("dplyr", "caret", "glmnet", "doParallel")
+check_and_install(required_packages)
+
+library(doParallel)
+cl <- makePSOCKcluster(detectCores() - 1)
+registerDoParallel(cl)
+
+load("~/Desktop/ML_project/flight_train_test_selected.RData")
+```
+
+```{r}
+
+# Set seed for reproducibility
+set.seed(466503)
+
+preProcess_values <- preProcess(flight_train_selected, method = c("range"))
+flight_train_scaled <- predict(preProcess_values, flight_train_selected)
+flight_test_scaled <- predict(preProcess_values, flight_test_selected)
+
+```
+
+```{r}
+# Re-train the models with normalized data
+# (Re-run the model training steps as in the original code)
+
+# Define the control for cross-validation
+ctrl_cv5 <- trainControl(method = "cv", number = 5)
+
+# Define a reduced range of lambda values for tuning
+lambdas <- seq(10, 1000, 50)  # Adjust the range and step size for quicker execution
+
+# Create a tuning grid for Ridge regression
+parameters_ridge <- expand.grid(alpha = 0, lambda = lambdas)
+
+# Train the Ridge regression model
+flight_ridge <- train(Arrival_Delay ~ .,
+                      data = flight_train_scaled,
+                      method = "glmnet",
+                      tuneGrid = parameters_ridge,
+                      trControl = ctrl_cv5)
+
+# Display the results of the Ridge regression model
+print(flight_ridge)
+plot(flight_ridge)
+
+```
+
+```{r}
+# Check the best lambda value
+best_lambda_ridge <- flight_ridge$bestTune$lambda
+coefficients_best_lambda_ridge <- predict(flight_ridge$finalModel,
+                                          s = best_lambda_ridge,
+                                          type = "coefficients")
+print(coefficients_best_lambda_ridge)
+```
+
+```{r}
+coefficients_ols <- predict(flight_ridge$finalModel,
+                            s = 0,
+                            type = "coefficients")
+print(coefficients_ols)
+
+```
+```{r}
+
+# Train an OLS model for comparison
+flight_lm <- train(Arrival_Delay ~ .,
+                   data = flight_train_scaled,
+                   method = "glmnet",
+                   tuneGrid = expand.grid(alpha = 0, lambda = 0),
+                   trControl = trainControl(method = "none"))
+
+print(flight_lm)
+
+```
+```{r}
+
+# Define a function to calculate regression metrics
+regressionMetrics <- function(real, predicted) {
+  mae <- mean(abs(real - predicted))
+  mape <- mean(abs((real - predicted) / real)) * 100
+  mse <- mean((real - predicted)^2)
+  rmse <- sqrt(mse)
+  r2 <- 1 - sum((real - predicted)^2) / sum((real - mean(real))^2)
+  list(MAE = mae, MAPE = mape, MSE = mse, RMSE = rmse, R2 = r2)
+}
+
+# Calculate metrics for OLS model
+ols_metrics <- regressionMetrics(real = flight_test_scaled$Arrival_Delay,
+                                 predicted = predict(flight_lm, flight_test_scaled))
+print(ols_metrics)
+```
+```{r}
+# Calculate metrics for the best Ridge regression model
+ridge_metrics <- regressionMetrics(real = flight_test_scaled$Arrival_Delay,
+                                   predicted = predict(flight_ridge, flight_test_scaled))
+print(ridge_metrics)
+
+```
+```{r}
+# Define a tuning grid for LASSO regression
+parameters_lasso <- expand.grid(alpha = 1, lambda = lambdas)
+
+# Train the LASSO regression model
+flight_lasso <- train(Arrival_Delay ~ .,
+                      data = flight_train_scaled,
+                      method = "glmnet",
+                      tuneGrid = parameters_lasso,
+                      trControl = ctrl_cv5)
+
+
+# Display the results of the LASSO regression model
+print(flight_lasso)
+```
+
+```{r}
+
+# Check the best lambda value for LASSO
+best_lambda_lasso <- flight_lasso$bestTune$lambda
+coefficients_best_lambda_lasso <- predict(flight_lasso$finalModel,
+                                          s = best_lambda_lasso,
+                                          type = "coefficients")
+print(coefficients_best_lambda_lasso)
+
+coefficients_large_lambda_lasso <- predict(flight_lasso$finalModel,
+                                           s = 4000,
+                                           type = "coefficients")
+print(coefficients_large_lambda_lasso)
+
+```
+
+```{r}
+# Calculate metrics for the best LASSO regression model
+lasso_metrics <- regressionMetrics(real = flight_test_scaled$Arrival_Delay,
+                                   predicted = predict(flight_lasso, flight_test_scaled))
+print(lasso_metrics)
+```
+
+```{r}
+
+# Define a tuning grid for Elastic Net regression
+parameters_elastic <- expand.grid(alpha = seq(0, 1, 0.5),
+                                  lambda = lambdas)
+
+# Train the Elastic Net regression model
+flight_elastic <- train(Arrival_Delay ~ .,
+                        data = flight_train_scaled,
+                        method = "glmnet",
+                        tuneGrid = parameters_elastic,
+                        trControl = ctrl_cv5)
+
+# Display the results of the Elastic Net regression model
+print(flight_elastic)
+plot(flight_elastic)
+
+```
+
+```{r}
+
+# Calculate metrics for the best Elastic Net regression model
+elastic_metrics <- regressionMetrics(real = flight_test_scaled$Arrival_Delay,
+                                     predicted = predict(flight_elastic, flight_test_scaled))
+print(elastic_metrics)
+```
+
+```{r}
+cat("OLS MAPE:", ols_metrics$MAPE, "\n")
+cat("Ridge MAPE:", ridge_metrics$MAPE, "\n")
+cat("LASSO MAPE:", lasso_metrics$MAPE, "\n")
+cat("Elastic Net MAPE:", elastic_metrics$MAPE, "\n")
+
+```
+```{r}
+
+#-----------------------
+# Load the new dataset
+
+load("~/Desktop/ML_project/predict_data.RData")
+
+# Preprocess the new data if needed
+
+
+# Make predictions on the new dataset
+test_data$Predicted_Arrival_Delay <- predict(flight_lm, test_data)
+test_data$Predicted_Arrival_Delay[test_data$Flight_Cancelled == "True"] <- 0
+# Save the results to a CSV file
+write.csv(test_data, "~/Desktop/ML_project/output/flight_predictions.csv", row.names = FALSE)
+```
+
